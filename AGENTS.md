@@ -1,5 +1,9 @@
 # my-pi
 
+## Package management
+
+Use `pnpm`. Wrap every dependency installation or update in Socket Firewall: `sfw pnpm install`, `sfw pnpm add <package>`, or `sfw pnpm remove <package>`.
+
 ## Agent skills
 
 ### Issue tracker

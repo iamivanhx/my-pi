@@ -28,12 +28,15 @@ function getCommands(
   disabledResources: string[] = [],
   installPackages = false,
 ) {
+  const env: NodeJS.ProcessEnv = { ...process.env, HOME: configDirectory, PI_CODING_AGENT_DIR: configDirectory };
+  delete env.PI_SUBAGENT_CHILD;
+
   return spawnSync(
     resolve("node_modules/.bin/pi"),
     ["--approve", ...(installPackages ? [] : ["--offline"]), "--mode", "rpc", "--no-session", "--no-prompt-templates", "--no-themes", ...disabledResources],
     {
       cwd: process.cwd(),
-      env: { ...process.env, HOME: configDirectory, PI_CODING_AGENT_DIR: configDirectory },
+      env,
       input: '{"id":"commands","type":"get_commands"}\n',
       encoding: "utf8",
     },
@@ -60,6 +63,19 @@ test("loads /learning from the project-local package path", async () => {
 
     assert.equal(result.status, 0, result.stderr);
     assert.ok(parseCommands(result.stdout).some((command) => command.name === "learning"));
+  } finally {
+    await rm(configDirectory, { recursive: true, force: true });
+  }
+});
+
+test("loads pi-subagents alongside the packaged roster", async () => {
+  const configDirectory = await mkdtemp(resolve(tmpdir(), "my-pi-test-"));
+
+  try {
+    const result = getCommands(configDirectory, ["--no-skills"], true);
+
+    assert.equal(result.status, 0, result.stderr);
+    assert.ok(parseCommands(result.stdout).some((command) => command.name === "subagents"));
   } finally {
     await rm(configDirectory, { recursive: true, force: true });
   }

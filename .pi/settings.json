@@ -1,6 +1,39 @@
 {
+  "npmCommand": [
+    "node",
+    "-e",
+    "const { spawnSync } = require('node:child_process'); const args = process.argv.slice(2).flatMap((argument) => argument === '--legacy-peer-deps' ? ['--strict-peer-dependencies=false', '--config.autoInstallPeers=false'] : argument === '--omit=dev' ? ['--prod'] : [argument]); const result = spawnSync('sfw', ['pnpm', ...args], { stdio: 'inherit' }); process.exit(result.status ?? 1);",
+    "sfw-pnpm"
+  ],
+  "subagents": {
+    "defaultModel": "claude-bridge/claude-sonnet-5",
+    "agentOverrides": {
+      "writer": { "model": "openai-codex/gpt-5.6-luna:low" },
+      "researcher": { "model": "claude-bridge/claude-sonnet-5:medium" },
+      "issue-reviewer": { "model": "claude-bridge/claude-sonnet-5:high" },
+      "perf-auditor": { "model": "claude-bridge/claude-sonnet-5:high" },
+      "pr-reviewer-claude": { "model": "claude-bridge/claude-opus-5:high" },
+      "pr-reviewer-gpt": { "model": "openai-codex/gpt-5.6-sol:high" },
+      "security-auditor": { "model": "claude-bridge/claude-opus-5:high" },
+      "designer": {
+        "model": "fireworks/accounts/fireworks/models/kimi-k3",
+        "fallbackModels": ["claude-bridge/claude-opus-5"]
+      }
+    }
+  },
   "packages": [
     "..",
+    {
+      "source": "npm:pi-subagents@0.40.0",
+      "skills": [],
+      "prompts": []
+    },
+    "npm:pi-web-access@0.18.0",
+    {
+      "source": "npm:@upstash/context7-pi@0.1.2",
+      "skills": [],
+      "prompts": []
+    },
     {
       "source": "git:github.com/mattpocock/skills@2ab958093e83e0ec752e6c1c5932da465bf23e0c",
       "skills": [
