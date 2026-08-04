@@ -1,4 +1,10 @@
 {
+  "npmCommand": [
+    "node",
+    "-e",
+    "const { spawnSync } = require('node:child_process'); const args = process.argv.slice(2).flatMap((argument) => argument === '--legacy-peer-deps' ? ['--strict-peer-dependencies=false', '--config.autoInstallPeers=false'] : argument === '--omit=dev' ? ['--prod'] : [argument]); const result = spawnSync('sfw', ['pnpm', ...args], { stdio: 'inherit' }); process.exit(result.status ?? 1);",
+    "sfw-pnpm"
+  ],
   "subagents": {
     "defaultModel": "claude-bridge/claude-sonnet-5",
     "agentOverrides": {
