@@ -1,3 +1,26 @@
 {
-  "packages": [".."]
+  "packages": [
+    "..",
+    {
+      "source": "git:github.com/mattpocock/skills@2ab958093e83e0ec752e6c1c5932da465bf23e0c",
+      "skills": [
+        "!skills/**",
+        "+skills/engineering/code-review/SKILL.md",
+        "+skills/engineering/codebase-design/SKILL.md",
+        "+skills/engineering/diagnosing-bugs/SKILL.md",
+        "+skills/engineering/domain-modeling/SKILL.md",
+        "+skills/engineering/improve-codebase-architecture/SKILL.md",
+        "+skills/engineering/prototype/SKILL.md",
+        "+skills/engineering/research/SKILL.md",
+        "+skills/engineering/resolving-merge-conflicts/SKILL.md",
+        "+skills/engineering/setup-matt-pocock-skills/SKILL.md",
+        "+skills/engineering/tdd/SKILL.md",
+        "+skills/engineering/to-spec/SKILL.md",
+        "+skills/engineering/to-tickets/SKILL.md",
+        "+skills/engineering/triage/SKILL.md",
+        "+skills/engineering/wayfinder/SKILL.md",
+        "+skills/productivity/grilling/SKILL.md"
+      ]
+    }
+  ]
 }
