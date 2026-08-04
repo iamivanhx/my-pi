@@ -113,3 +113,13 @@ tools:
 - pi-mcp-adapter: https://registry.npmjs.org/pi-mcp-adapter
 - Context7 CLI: https://context7.com/docs/clients/cli
 - tomsej/pi-ext (gh recipes): https://github.com/tomsej/pi-ext
+
+---
+
+## Addendum (2026-08-04, post-review)
+
+The survey missed **[@upstash/context7-pi](https://www.npmjs.com/package/@upstash/context7-pi)** (0.1.2, ~3.1k dl/mo): an *official* Upstash pi extension registering `resolve-library-id` + `query-docs` directly — no MCP adapter or `ctx7` CLI detour. **Recommended loadout amended to include it:**
+
+`read, bash, web_search, fetch_content, get_search_content, source_check, resolve-library-id, query-docs` (add `pi install npm:@upstash/context7-pi`).
+
+Consequences: the pi-mcp-adapter defer verdict strengthens (its last near-term use case is gone). Also reviewed and skipped: [context-mode](https://www.npmjs.com/package/context-mode) — redundant with pi's native context management per the token-efficiency decision (#4).
