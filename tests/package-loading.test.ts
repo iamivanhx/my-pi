@@ -81,7 +81,7 @@ test("loads pi-subagents alongside the packaged roster", async () => {
   }
 });
 
-test("loads exactly the pinned Matt Pocock skills", async () => {
+test("loads the pinned Matt Pocock and designer skills", async () => {
   const configDirectory = await mkdtemp(resolve(tmpdir(), "my-pi-test-"));
 
   try {
@@ -93,19 +93,29 @@ test("loads exactly the pinned Matt Pocock skills", async () => {
       .map((command) => command.name.replace("skill:", ""))
       .sort();
 
-    assert.deepEqual(skillNames, pinnedMattPocockSkills);
+    assert.deepEqual(skillNames, [
+      ...pinnedMattPocockSkills,
+      "design-system",
+      "frontend-design",
+      "web-design-guidelines",
+    ].sort());
   } finally {
     await rm(configDirectory, { recursive: true, force: true });
   }
 });
 
-test("documents the immutable skill pin and pin-bump procedure", async () => {
-  const [agentInstructions, pinDocument] = await Promise.all([
+test("documents immutable skill pins and their bump procedures", async () => {
+  const [agentInstructions, mattPocockPin, designerPin] = await Promise.all([
     readFile("AGENTS.md", "utf8"),
     readFile("docs/skills/mattpocock.md", "utf8"),
+    readFile("docs/skills/designer.md", "utf8"),
   ]);
 
   assert.match(agentInstructions, /docs\/skills\/mattpocock\.md/);
-  assert.match(pinDocument, /git:github\.com\/mattpocock\/skills@2ab958093e83e0ec752e6c1c5932da465bf23e0c/);
-  assert.match(pinDocument, /pi install -l git:github\.com\/mattpocock\/skills@<new-commit>/);
+  assert.match(agentInstructions, /docs\/skills\/designer\.md/);
+  assert.match(mattPocockPin, /git:github\.com\/mattpocock\/skills@2ab958093e83e0ec752e6c1c5932da465bf23e0c/);
+  assert.match(mattPocockPin, /pi install -l git:github\.com\/mattpocock\/skills@<new-commit>/);
+  assert.match(designerPin, /b29e7cf65e5cb78a5ac33d582270551bc74a14eb/);
+  assert.match(designerPin, /4e799d45c17aec1498c269287a83b9dba22b966b/);
+  assert.match(designerPin, /pnpm test/);
 });
