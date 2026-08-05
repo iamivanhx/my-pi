@@ -1,9 +1,11 @@
+import { randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 const WAYFINDER_SKILL = "wayfinder";
 const GREENFIELD = "Greenfield";
+const DRAFT_SPEC = "Draft a settled spec";
 
 export default function defineExtension(pi: ExtensionAPI): void {
   pi.registerCommand("define", {
@@ -39,6 +41,27 @@ export default function defineExtension(pi: ExtensionAPI): void {
 
       const kind = await ctx.ui.select("What kind of idea is this?", ["Existing project", GREENFIELD]);
       if (!kind) return;
+
+      const beat = await ctx.ui.select("What should happen next?", ["Chart with wayfinder", DRAFT_SPEC]);
+      if (!beat) return;
+
+      if (beat === DRAFT_SPEC) {
+        pi.events.emit("subagents:rpc:v1:request", {
+          version: 1,
+          requestId: randomUUID(),
+          method: "spawn",
+          params: {
+            agent: "writer",
+            context: "fresh",
+            cwd: ctx.cwd,
+            task: [
+              "Draft a decision-complete specification from the settled decisions. Surface unresolved decisions instead of inventing them.",
+              args.trim() ? `Idea:\n${args.trim()}` : "",
+            ].filter(Boolean).join("\n\n"),
+          },
+        });
+        return;
+      }
 
       pi.sendUserMessage([
         `${kind === GREENFIELD ? "This is a greenfield idea, so it must use the wayfinder route." : "Begin by charting this idea with wayfinder."}`,
