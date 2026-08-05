@@ -20,4 +20,4 @@ Single-context: `CONTEXT.md` + `docs/adr/` at the repo root. See `docs/agents/do
 
 ### Pinned skills
 
-The project-selected Matt Pocock skills, immutable commit pin, and pin-bump procedure live in `docs/skills/mattpocock.md`.
+The project-selected Matt Pocock and designer skills, immutable commit pins, and pin-bump procedures live in `docs/skills/mattpocock.md` and `docs/skills/designer.md`.

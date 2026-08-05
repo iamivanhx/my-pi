@@ -34,6 +34,14 @@
       "skills": [],
       "prompts": []
     },
+    "npm:pi-lean-portal@0.4.0",
+    {
+      "source": "git:github.com/anthropics/skills@b29e7cf65e5cb78a5ac33d582270551bc74a14eb",
+      "skills": [
+        "!skills/**",
+        "+skills/frontend-design/SKILL.md"
+      ]
+    },
     {
       "source": "git:github.com/mattpocock/skills@2ab958093e83e0ec752e6c1c5932da465bf23e0c",
       "skills": [
