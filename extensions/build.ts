@@ -75,6 +75,14 @@ function bashFailed(event: { isError: boolean }): boolean {
   return event.isError;
 }
 
+function hasPriorSessionWork(branch: unknown[]): boolean {
+  return branch.some((entry) => {
+    if (!entry || typeof entry !== "object") return true;
+    const type = (entry as { type?: unknown }).type;
+    return type !== "model_change" && type !== "thinking_level_change" && type !== "session_info";
+  });
+}
+
 function parseIssueNumber(args: string): number | undefined {
   const match = args.trim().match(/^#?(\d+)$/);
   return match ? Number(match[1]) : undefined;
@@ -289,7 +297,7 @@ export default function buildExtension(pi: ExtensionAPI): void {
         return;
       }
       const sessionManager = ctx.sessionManager as { getBranch?: () => unknown[] } | undefined;
-      if (sessionManager?.getBranch && sessionManager.getBranch().length > 0) {
+      if (sessionManager?.getBranch && hasPriorSessionWork(sessionManager.getBranch())) {
         ctx.ui.notify("/build must start in a fresh session window.", "warning");
         return;
       }
