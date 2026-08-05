@@ -51,6 +51,8 @@ test("allows /build in a new session that only contains Pi startup metadata", as
   const calls: Array<[string, string[]]> = [];
   const { command, sentMessages } = buildHarness(async (program, args) => {
     calls.push([program, args]);
+    if (args.join(" ") === "branch --show-current") return { code: 0, stdout: "main\n", stderr: "" };
+    if (args.join(" ") === "symbolic-ref --short refs/remotes/origin/HEAD") return { code: 0, stdout: "origin/main\n", stderr: "" };
     return {
       code: 0,
       stdout: JSON.stringify({ number: 29, title: "the nine gates", body: "Build it." }),
@@ -73,7 +75,12 @@ test("allows /build in a new session that only contains Pi startup metadata", as
 
   await command.handler("29", context);
 
-  assert.deepEqual(calls, [["gh", ["issue", "view", "29", "--json", "number,title,body"]]]);
+  assert.deepEqual(calls, [
+    ["gh", ["issue", "view", "29", "--json", "number,title,body"]],
+    ["git", ["branch", "--show-current"]],
+    ["git", ["symbolic-ref", "--short", "refs/remotes/origin/HEAD"]],
+    ["git", ["switch", "-c", "build/29-the-nine-gates"]],
+  ]);
   assert.equal(notifications.length, 0);
   assert.equal(sentMessages.length, 1);
 });
@@ -106,6 +113,8 @@ test("opens one Issue, injects the nine gates, and blocks tests before program d
   const calls: Array<[string, string[]]> = [];
   const { command, handlers, sentMessages } = buildHarness(async (program, args) => {
     calls.push([program, args]);
+    if (args.join(" ") === "branch --show-current") return { code: 0, stdout: "main\n", stderr: "" };
+    if (args.join(" ") === "symbolic-ref --short refs/remotes/origin/HEAD") return { code: 0, stdout: "origin/main\n", stderr: "" };
     return {
       code: 0,
       stdout: JSON.stringify({ number: 29, title: "the nine gates", body: "Build it." }),
@@ -123,7 +132,12 @@ test("opens one Issue, injects the nine gates, and blocks tests before program d
 
   await command.handler("#29", context);
 
-  assert.deepEqual(calls, [["gh", ["issue", "view", "29", "--json", "number,title,body"]]]);
+  assert.deepEqual(calls, [
+    ["gh", ["issue", "view", "29", "--json", "number,title,body"]],
+    ["git", ["branch", "--show-current"]],
+    ["git", ["symbolic-ref", "--short", "refs/remotes/origin/HEAD"]],
+    ["git", ["switch", "-c", "build/29-the-nine-gates"]],
+  ]);
   assert.equal(notifications.length, 0);
   assert.equal(sentMessages.length, 1);
   assert.match(sentMessages[0], /manage_todo_list/);
@@ -260,6 +274,7 @@ test("creates a grouped draft PR and closes the Issue after push", async () => {
       if (program === "gh" && args[0] === "issue" && args[1] === "view") {
         return { code: 0, stdout: JSON.stringify({ number: 29, title: "the nine gates", body: "PR group: #29, #30" }), stderr: "" };
       }
+      if (args.join(" ") === "symbolic-ref --short refs/remotes/origin/HEAD") return { code: 0, stdout: "origin/main\n", stderr: "" };
       if (program === "git") return { code: 0, stdout: "build/nine-gates\n", stderr: "" };
       if (program === "gh" && args[0] === "pr" && args[1] === "list") return { code: 0, stdout: "[]", stderr: "" };
       return { code: 0, stdout: "https://github.com/iamivanhx/my-pi/pull/40\n", stderr: "" };
@@ -279,7 +294,7 @@ test("creates a grouped draft PR and closes the Issue after push", async () => {
     const toolResult = handlers.get("tool_result")!;
     const agentEnd = handlers.get("agent_end")!;
     const succeed = async (id: string, commandText: string, isError = false) => {
-      toolCall({ toolName: "bash", toolCallId: id, input: { command: commandText } }, context);
+      await toolCall({ toolName: "bash", toolCallId: id, input: { command: commandText } }, context);
       toolResult({ toolName: "bash", toolCallId: id, isError }, context);
       await agentEnd({}, context);
     };
@@ -316,6 +331,7 @@ test("reuses a grouped draft PR whose closing references already contain the Iss
       if (program === "gh" && args[0] === "issue" && args[1] === "view") {
         return { code: 0, stdout: JSON.stringify({ number: 30, title: "second gate run", body: "PR group: #29, #30" }), stderr: "" };
       }
+      if (args.join(" ") === "symbolic-ref --short refs/remotes/origin/HEAD") return { code: 0, stdout: "origin/main\n", stderr: "" };
       if (program === "git") return { code: 0, stdout: "build/nine-gates\n", stderr: "" };
       if (program === "gh" && args[0] === "pr" && args[1] === "list") {
         return { code: 0, stdout: JSON.stringify([{ number: 40, body: "Closes #29\nCloses #30", headRefName: "build/nine-gates", closingIssuesReferences: [{ number: 29 }, { number: 30 }] }]), stderr: "" };
@@ -331,7 +347,7 @@ test("reuses a grouped draft PR whose closing references already contain the Iss
     const toolResult = handlers.get("tool_result")!;
     const agentEnd = handlers.get("agent_end")!;
     const succeed = async (id: string, commandText: string, isError = false) => {
-      toolCall({ toolName: "bash", toolCallId: id, input: { command: commandText } }, context);
+      await toolCall({ toolName: "bash", toolCallId: id, input: { command: commandText } }, context);
       toolResult({ toolName: "bash", toolCallId: id, isError }, context);
       await agentEnd({}, context);
     };
@@ -351,4 +367,227 @@ test("reuses a grouped draft PR whose closing references already contain the Iss
   } finally {
     await rm(skillDirectory, { recursive: true, force: true });
   }
+});
+
+test("creates an issue branch before entering the clarify gate from the default branch", async () => {
+  const calls: Array<[string, string[]]> = [];
+  const { command, sentMessages } = buildHarness(async (program, args) => {
+    calls.push([program, args]);
+    if (program === "gh") {
+      return { code: 0, stdout: JSON.stringify({ number: 42, title: "Fix /build branch gate: never commit directly to main", body: "Build it." }), stderr: "" };
+    }
+    if (args.join(" ") === "branch --show-current") return { code: 0, stdout: "main\n", stderr: "" };
+    if (args.join(" ") === "symbolic-ref --short refs/remotes/origin/HEAD") return { code: 0, stdout: "origin/main\n", stderr: "" };
+    return { code: 0, stdout: "", stderr: "" };
+  });
+  const context = {
+    cwd: "/project",
+    hasUI: true,
+    isIdle: () => true,
+    sessionManager: { getBranch: () => [] },
+    ui: { notify() {} },
+  };
+
+  await command.handler("42", context);
+
+  assert.deepEqual(calls, [
+    ["gh", ["issue", "view", "42", "--json", "number,title,body"]],
+    ["git", ["branch", "--show-current"]],
+    ["git", ["symbolic-ref", "--short", "refs/remotes/origin/HEAD"]],
+    ["git", ["switch", "-c", "build/42-fix-build-branch-gate-never-commit-directly-to-main"]],
+  ]);
+  assert.equal(sentMessages.length, 1);
+});
+
+test("blocks commits and pushes when the active branch is the repository default branch", async () => {
+  let branchName = "main";
+  const { command, handlers } = buildHarness(async (program, args) => {
+    if (program === "gh") return { code: 0, stdout: JSON.stringify({ number: 42, title: "branch safety", body: "Build it." }), stderr: "" };
+    if (args.join(" ") === "branch --show-current") return { code: 0, stdout: `${branchName}\n`, stderr: "" };
+    if (args.join(" ") === "symbolic-ref --short refs/remotes/origin/HEAD") return { code: 0, stdout: "origin/main\n", stderr: "" };
+    if (args[0] === "switch") branchName = args.at(-1)!;
+    return { code: 0, stdout: "", stderr: "" };
+  });
+  const context = {
+    cwd: "/project",
+    hasUI: true,
+    isIdle: () => true,
+    sessionManager: { getBranch: () => [] },
+    ui: { notify() {} },
+  };
+
+  await command.handler("42", context);
+  branchName = "main";
+
+  for (const commandText of ["git commit -m unsafe", "git push origin main"]) {
+    const blocked = await handlers.get("tool_call")?.({
+      toolName: "bash",
+      toolCallId: commandText,
+      input: { command: commandText },
+    }, context) as { block?: boolean; reason?: string };
+    assert.equal(blocked?.block, true);
+    assert.match(blocked?.reason ?? "", /default branch/i);
+  }
+});
+
+test("refuses the PR action when the pushed branch becomes the default branch", async () => {
+  const skillDirectory = await mkdtemp(join(tmpdir(), "my-pi-build-test-"));
+  const tddPath = join(skillDirectory, "tdd.md");
+  const reviewPath = join(skillDirectory, "code-review.md");
+  await Promise.all([writeFile(tddPath, "# TDD\n"), writeFile(reviewPath, "# Code review\n")]);
+  let branchName = "build/42-branch-safety";
+  const calls: Array<[string, string[]]> = [];
+
+  try {
+    const { command, handlers, emitted, eventHandlers } = buildHarness(async (program, args) => {
+      calls.push([program, args]);
+      if (program === "gh" && args[0] === "issue" && args[1] === "view") {
+        return { code: 0, stdout: JSON.stringify({ number: 42, title: "branch safety", body: "Build it." }), stderr: "" };
+      }
+      if (args.join(" ") === "branch --show-current") return { code: 0, stdout: `${branchName}\n`, stderr: "" };
+      if (args.join(" ") === "symbolic-ref --short refs/remotes/origin/HEAD") return { code: 0, stdout: "origin/main\n", stderr: "" };
+      return { code: 0, stdout: "ok\n", stderr: "" };
+    });
+    const notifications: Array<{ message: string; level: string }> = [];
+    const context = {
+      cwd: "/project", hasUI: true, isIdle: () => true, sessionManager: { getBranch: () => [] },
+      getSystemPromptOptions: () => ({ skills: [{ name: "tdd", filePath: tddPath }, { name: "code-review", filePath: reviewPath }] }),
+      ui: { notify: (message: string, level: string) => notifications.push({ message, level }) },
+    };
+    const toolCall = handlers.get("tool_call")!;
+    const toolResult = handlers.get("tool_result")!;
+    const agentEnd = handlers.get("agent_end")!;
+    const succeed = async (id: string, commandText: string, isError = false) => {
+      await toolCall({ toolName: "bash", toolCallId: id, input: { command: commandText } }, context);
+      toolResult({ toolName: "bash", toolCallId: id, isError }, context);
+      await agentEnd({}, context);
+    };
+
+    await command.handler("42", context);
+    await succeed("design", "gh issue comment 42 --body design");
+    await succeed("red", "pnpm test -- tests/build.test.ts", true);
+    await succeed("green", "pnpm test -- tests/build.test.ts");
+    eventHandlers.get("prompt-template:subagent:response")?.({ requestId: (emitted[0].payload as { requestId: string }).requestId, status: "completed" });
+    await succeed("suite", "pnpm test");
+    await succeed("commit", "git commit -m branch-safety");
+    await toolCall({ toolName: "bash", toolCallId: "push", input: { command: "git push" } }, context);
+    branchName = "main";
+    toolResult({ toolName: "bash", toolCallId: "push", isError: false }, context);
+    await agentEnd({}, context);
+
+    assert.equal(calls.some(([program, args]) => program === "gh" && args[0] === "pr" && args[1] === "create"), false);
+    assert.deepEqual(notifications, [{ message: "Refusing to create a PR from the repository default branch.", level: "error" }]);
+  } finally {
+    await rm(skillDirectory, { recursive: true, force: true });
+  }
+});
+
+test("blocks a push that explicitly targets the repository default branch", async () => {
+  const { command, handlers } = buildHarness(async (program, args) => {
+    if (program === "gh") return { code: 0, stdout: JSON.stringify({ number: 42, title: "branch safety", body: "Build it." }), stderr: "" };
+    if (args.join(" ") === "branch --show-current") return { code: 0, stdout: "build/42-branch-safety\n", stderr: "" };
+    if (args.join(" ") === "symbolic-ref --short refs/remotes/origin/HEAD") return { code: 0, stdout: "origin/main\n", stderr: "" };
+    return { code: 0, stdout: "", stderr: "" };
+  });
+  const context = {
+    cwd: "/project", hasUI: true, isIdle: () => true, sessionManager: { getBranch: () => [] }, ui: { notify() {} },
+  };
+
+  await command.handler("42", context);
+  const blocked = await handlers.get("tool_call")?.({
+    toolName: "bash",
+    toolCallId: "push-default",
+    input: { command: "git push origin HEAD:main" },
+  }, context) as { block?: boolean; reason?: string };
+
+  assert.equal(blocked?.block, true);
+  assert.match(blocked?.reason ?? "", /default branch/i);
+});
+
+test("uses GitHub's default branch when origin HEAD is unavailable", async () => {
+  const calls: Array<[string, string[]]> = [];
+  const { command, sentMessages } = buildHarness(async (program, args) => {
+    calls.push([program, args]);
+    if (program === "gh" && args[0] === "issue") {
+      return { code: 0, stdout: JSON.stringify({ number: 42, title: "branch safety", body: "Build it." }), stderr: "" };
+    }
+    if (program === "gh" && args[0] === "repo") return { code: 0, stdout: "main\n", stderr: "" };
+    if (args.join(" ") === "branch --show-current") return { code: 0, stdout: "main\n", stderr: "" };
+    if (args.join(" ") === "symbolic-ref --short refs/remotes/origin/HEAD") return { code: 1, stdout: "", stderr: "origin/HEAD is not set" };
+    return { code: 0, stdout: "", stderr: "" };
+  });
+  const context = {
+    cwd: "/project", hasUI: true, isIdle: () => true, sessionManager: { getBranch: () => [] }, ui: { notify() {} },
+  };
+
+  await command.handler("42", context);
+
+  assert.ok(calls.some(([program, args]) => program === "gh" && args.join(" ") === "repo view --json defaultBranchRef --jq .defaultBranchRef.name"));
+  assert.ok(calls.some(([program, args]) => program === "git" && args.join(" ") === "switch -c build/42-branch-safety"));
+  assert.equal(sentMessages.length, 1);
+});
+
+test("checks out an existing issue branch after an interrupted build", async () => {
+  const calls: Array<[string, string[]]> = [];
+  const { command, sentMessages } = buildHarness(async (program, args) => {
+    calls.push([program, args]);
+    if (program === "gh") return { code: 0, stdout: JSON.stringify({ number: 42, title: "branch safety", body: "Build it." }), stderr: "" };
+    if (args.join(" ") === "branch --show-current") return { code: 0, stdout: "main\n", stderr: "" };
+    if (args.join(" ") === "symbolic-ref --short refs/remotes/origin/HEAD") return { code: 0, stdout: "origin/main\n", stderr: "" };
+    if (args.join(" ") === "switch -c build/42-branch-safety") return { code: 1, stdout: "", stderr: "already exists" };
+    return { code: 0, stdout: "", stderr: "" };
+  });
+  const context = {
+    cwd: "/project", hasUI: true, isIdle: () => true, sessionManager: { getBranch: () => [] }, ui: { notify() {} },
+  };
+
+  await command.handler("42", context);
+
+  assert.ok(calls.some(([program, args]) => program === "git" && args.join(" ") === "switch build/42-branch-safety"));
+  assert.equal(sentMessages.length, 1);
+});
+
+test("blocks a chained commit and push that targets the default branch", async () => {
+  const { command, handlers } = buildHarness(async (program, args) => {
+    if (program === "gh") return { code: 0, stdout: JSON.stringify({ number: 42, title: "branch safety", body: "Build it." }), stderr: "" };
+    if (args.join(" ") === "branch --show-current") return { code: 0, stdout: "build/42-branch-safety\n", stderr: "" };
+    if (args.join(" ") === "symbolic-ref --short refs/remotes/origin/HEAD") return { code: 0, stdout: "origin/main\n", stderr: "" };
+    return { code: 0, stdout: "", stderr: "" };
+  });
+  const context = {
+    cwd: "/project", hasUI: true, isIdle: () => true, sessionManager: { getBranch: () => [] }, ui: { notify() {} },
+  };
+
+  await command.handler("42", context);
+  const blocked = await handlers.get("tool_call")?.({
+    toolName: "bash",
+    toolCallId: "chain",
+    input: { command: "git commit -m branch-safety && git push origin HEAD:main" },
+  }, context) as { block?: boolean; reason?: string };
+
+  assert.equal(blocked?.block, true);
+  assert.match(blocked?.reason ?? "", /default branch/i);
+});
+
+test("does not mistake a feature branch ending in the default branch name for the default branch", async () => {
+  const { command, handlers } = buildHarness(async (program, args) => {
+    if (program === "gh") return { code: 0, stdout: JSON.stringify({ number: 42, title: "branch safety", body: "Build it." }), stderr: "" };
+    if (args.join(" ") === "branch --show-current") return { code: 0, stdout: "build/42-branch-safety\n", stderr: "" };
+    if (args.join(" ") === "symbolic-ref --short refs/remotes/origin/HEAD") return { code: 0, stdout: "origin/main\n", stderr: "" };
+    return { code: 0, stdout: "", stderr: "" };
+  });
+  const context = {
+    cwd: "/project", hasUI: true, isIdle: () => true, sessionManager: { getBranch: () => [] }, ui: { notify() {} },
+  };
+
+  await command.handler("42", context);
+  const blocked = await handlers.get("tool_call")?.({
+    toolName: "bash",
+    toolCallId: "feature-main",
+    input: { command: "git push origin feature/main" },
+  }, context) as { block?: boolean; reason?: string };
+
+  assert.equal(blocked?.block, true);
+  assert.doesNotMatch(blocked?.reason ?? "", /default branch/i);
+  assert.match(blocked?.reason ?? "", /before commit/i);
 });
