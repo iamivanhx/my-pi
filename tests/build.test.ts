@@ -47,6 +47,61 @@ test("registers the /build command", () => {
   assert.ok(command);
 });
 
+test("allows /build in a new session that only contains Pi startup metadata", async () => {
+  const calls: Array<[string, string[]]> = [];
+  const { command, sentMessages } = buildHarness(async (program, args) => {
+    calls.push([program, args]);
+    return {
+      code: 0,
+      stdout: JSON.stringify({ number: 29, title: "the nine gates", body: "Build it." }),
+      stderr: "",
+    };
+  });
+  const notifications: Array<{ message: string; level: string }> = [];
+  const context = {
+    cwd: "/project",
+    hasUI: true,
+    isIdle: () => true,
+    sessionManager: {
+      getBranch: () => [
+        { type: "model_change" },
+        { type: "thinking_level_change" },
+      ],
+    },
+    ui: { notify: (message: string, level: string) => notifications.push({ message, level }) },
+  };
+
+  await command.handler("29", context);
+
+  assert.deepEqual(calls, [["gh", ["issue", "view", "29", "--json", "number,title,body"]]]);
+  assert.equal(notifications.length, 0);
+  assert.equal(sentMessages.length, 1);
+});
+
+test("rejects /build after prior conversation work", async () => {
+  const { command } = buildHarness(async () => ({ code: 0, stdout: "", stderr: "" }));
+  const notifications: Array<{ message: string; level: string }> = [];
+  const context = {
+    hasUI: true,
+    isIdle: () => true,
+    sessionManager: {
+      getBranch: () => [
+        { type: "model_change" },
+        { type: "thinking_level_change" },
+        { type: "message", message: { role: "user", content: "prior work" } },
+      ],
+    },
+    ui: { notify: (message: string, level: string) => notifications.push({ message, level }) },
+  };
+
+  await command.handler("29", context);
+
+  assert.deepEqual(notifications, [{
+    message: "/build must start in a fresh session window.",
+    level: "warning",
+  }]);
+});
+
 test("opens one Issue, injects the nine gates, and blocks tests before program design", async () => {
   const calls: Array<[string, string[]]> = [];
   const { command, handlers, sentMessages } = buildHarness(async (program, args) => {
