@@ -101,6 +101,8 @@ test("loads the pinned Matt Pocock and designer skills", async () => {
       ...pinnedMattPocockSkills,
       "design-system",
       "frontend-design",
+      "observability",
+      "threat-model",
       "web-design-guidelines",
     ].sort());
   } finally {
