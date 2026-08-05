@@ -55,7 +55,7 @@ function parseCommands(stdout: string) {
   return response?.data?.commands ?? [];
 }
 
-test("loads /learning and /setup from the project-local package path", async () => {
+test("loads /learning, /setup, and /ship from the project-local package path", async () => {
   const configDirectory = await mkdtemp(resolve(tmpdir(), "my-pi-test-"));
 
   try {
@@ -65,6 +65,7 @@ test("loads /learning and /setup from the project-local package path", async () 
     const commandNames = parseCommands(result.stdout).map((command) => command.name);
     assert.ok(commandNames.includes("learning"));
     assert.ok(commandNames.includes("setup"));
+    assert.ok(commandNames.includes("ship"));
   } finally {
     await rm(configDirectory, { recursive: true, force: true });
   }

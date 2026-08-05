@@ -2,6 +2,8 @@ import { readFile } from "node:fs/promises";
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
+import { SHIPPING_DOCUMENT_FORMAT } from "./shipping/document.ts";
+
 const SETUP_SKILL_NAME = "setup-matt-pocock-skills";
 
 export default function setupExtension(pi: ExtensionAPI): void {
@@ -53,6 +55,10 @@ export default function setupExtension(pi: ExtensionAPI): void {
           "- rollback move",
           "- CI check name",
           "- monitoring URL optional",
+          "",
+          "Use this exact JSON-frontmatter format so /ship can validate and execute the workflow.",
+          "Replace the example values with this project's real commands and check name. Omit monitoringUrl when it is unavailable.",
+          SHIPPING_DOCUMENT_FORMAT,
           args.trim() ? `\nAdditional setup context:\n${args.trim()}` : "",
         ].join("\n"),
       );
