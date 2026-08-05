@@ -59,6 +59,12 @@ test("injects the pinned setup skill and starts the slim shipping interview", as
     assert.match(sentMessages[0], /rollback move/i);
     assert.match(sentMessages[0], /CI check name/i);
     assert.match(sentMessages[0], /monitoring URL optional/i);
+    assert.match(sentMessages[0], /exact JSON-frontmatter format/i);
+    assert.match(sentMessages[0], /"environments"/);
+    assert.match(sentMessages[0], /"deploy"/);
+    assert.match(sentMessages[0], /"verify"/);
+    assert.match(sentMessages[0], /"rollback"/);
+    assert.match(sentMessages[0], /"ciCheck"/);
     assert.doesNotMatch(sentMessages[0], /flag-system/i);
     assert.doesNotMatch(sentMessages[0], /external-PR-bot/i);
     assert.doesNotMatch(sentMessages[0], /rollout-mode/i);
