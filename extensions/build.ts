@@ -30,6 +30,8 @@ type Issue = {
 type BuildRun = {
   issue: Issue;
   groupIssues: number[];
+  defaultBranch: string;
+  currentBranch: string;
   gate: Gate;
   transitions: Map<string, Transition>;
   announced: Set<Gate>;
@@ -92,6 +94,57 @@ function parseGroupIssues(issue: Issue): number[] {
   const group = issue.body.match(/^PR group:\s*(.+)$/im)?.[1];
   const numbers = group?.match(/\d+/g)?.map(Number) ?? [];
   return [...new Set([issue.number, ...numbers])].sort((left, right) => left - right);
+}
+
+function issueBranchName(issue: Issue): string {
+  const slug = issue.title.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "issue";
+  return `build/${issue.number}-${slug}`;
+}
+
+async function currentBranch(pi: ExtensionAPI, cwd: string): Promise<string | undefined> {
+  const branch = await pi.exec("git", ["branch", "--show-current"], { cwd });
+  return branch.code === 0 ? branch.stdout.trim() || undefined : undefined;
+}
+
+async function defaultBranch(pi: ExtensionAPI, cwd: string): Promise<string | undefined> {
+  const branch = await pi.exec("git", ["symbolic-ref", "--short", "refs/remotes/origin/HEAD"], { cwd });
+  if (branch.code === 0) return branch.stdout.trim().replace(/^origin\//, "") || undefined;
+
+  const repository = await pi.exec("gh", ["repo", "view", "--json", "defaultBranchRef", "--jq", ".defaultBranchRef.name"], { cwd });
+  return repository.code === 0 ? repository.stdout.trim() || undefined : undefined;
+}
+
+function isProtectedBranch(run: BuildRun): boolean {
+  return run.currentBranch === run.defaultBranch;
+}
+
+type GitWriteAction = "commit" | "push";
+
+function gitWriteActions(command: string): GitWriteAction[] {
+  return [...command.matchAll(/\bgit\s+(commit|push)\b/g)].map((match) => match[1] as GitWriteAction);
+}
+
+function pushesToDefaultBranch(command: string, branch: string): boolean {
+  const pushCommand = command.match(/\bgit\s+push\b(?<arguments>.*)$/)?.groups?.arguments;
+  if (!pushCommand) return false;
+
+  const fullRef = `refs/heads/${branch}`;
+  return pushCommand.trim().split(/\s+/).some((ref) =>
+    ref === branch || ref === fullRef || ref.endsWith(`:${branch}`) || ref.endsWith(`:${fullRef}`),
+  );
+}
+
+async function guardDefaultBranch(pi: ExtensionAPI, run: BuildRun, action: GitWriteAction, command: string, cwd: string): Promise<ReturnType<typeof block> | undefined> {
+  const branch = await currentBranch(pi, cwd);
+  if (!branch) return block("cannot determine the current branch; refusing to continue.");
+
+  run.currentBranch = branch;
+  if (pushesToDefaultBranch(command, run.defaultBranch)) {
+    return block("cannot push directly to the repository default branch.");
+  }
+  if (isProtectedBranch(run)) return block(`cannot ${action} directly to the repository default branch.`);
+
+  return undefined;
 }
 
 function gateName(gate: Gate): string {
@@ -210,13 +263,17 @@ async function promptGate(pi: ExtensionAPI, run: BuildRun, ctx: ExtensionContext
 }
 
 async function performPrAction(pi: ExtensionAPI, run: BuildRun, ctx: ExtensionContext): Promise<void> {
-  const branch = await pi.exec("git", ["branch", "--show-current"], { cwd: ctx.cwd });
-  if (branch.code !== 0 || !branch.stdout.trim()) {
+  const branchName = await currentBranch(pi, ctx.cwd);
+  if (!branchName) {
     ctx.ui.notify("Could not determine the pushed branch for PR action.", "error");
     return;
   }
+  if (branchName === run.defaultBranch) {
+    ctx.ui.notify("Refusing to create a PR from the repository default branch.", "error");
+    return;
+  }
 
-  const branchName = branch.stdout.trim();
+  run.currentBranch = branchName;
   const listed = await pi.exec("gh", ["pr", "list", "--state", "open", "--limit", "100", "--json", "number,body,closingIssuesReferences,headRefName"], { cwd: ctx.cwd });
   if (listed.code !== 0) {
     ctx.ui.notify(`Could not list draft PRs: ${listed.stderr.trim() || `exit code ${listed.code}`}`, "error");
@@ -320,10 +377,32 @@ export default function buildExtension(pi: ExtensionAPI): void {
         return;
       }
 
+      const [branch, repositoryDefaultBranch] = await Promise.all([
+        currentBranch(pi, ctx.cwd),
+        defaultBranch(pi, ctx.cwd),
+      ]);
+      if (!branch || !repositoryDefaultBranch) {
+        ctx.ui.notify("Could not determine the current and default branches; /build cannot begin.", "error");
+        return;
+      }
+      const issueBranch = issueBranchName(issue);
+      if (branch === repositoryDefaultBranch) {
+        const created = await pi.exec("git", ["switch", "-c", issueBranch], { cwd: ctx.cwd });
+        if (created.code !== 0) {
+          const switched = await pi.exec("git", ["switch", issueBranch], { cwd: ctx.cwd });
+          if (switched.code !== 0) {
+            ctx.ui.notify(`Could not create or check out Issue branch ${issueBranch}: ${switched.stderr.trim() || created.stderr.trim() || `exit code ${switched.code}`}`, "error");
+            return;
+          }
+        }
+      }
+
       const skills = (ctx.getSystemPromptOptions?.().skills ?? []).map((skill) => [skill.name, skill.filePath] as const);
       activeRun = {
         issue,
         groupIssues: parseGroupIssues(issue),
+        defaultBranch: repositoryDefaultBranch,
+        currentBranch: branch === repositoryDefaultBranch ? issueBranch : branch,
         gate: "clarify",
         transitions: new Map(),
         announced: new Set(),
@@ -333,7 +412,7 @@ export default function buildExtension(pi: ExtensionAPI): void {
     },
   });
 
-  pi.on("tool_call", (event) => {
+  pi.on("tool_call", (event, ctx) => {
     const run = activeRun;
     if (!run) return;
 
@@ -362,11 +441,22 @@ export default function buildExtension(pi: ExtensionAPI): void {
     if (isTestCommand(command) && ["commit", "push", "pr", "close"].includes(run.gate)) {
       return block(`${gateName(run.gate)} is active; the suite has already passed.`);
     }
-    if (/\bgit\s+commit\b/.test(command) && run.gate !== "commit") {
-      return block(`cannot commit before the final full suite; current gate is ${gateName(run.gate)}.`);
-    }
-    if (/\bgit\s+push\b/.test(command) && run.gate !== "push") {
-      return block(`cannot push before commit; current gate is ${gateName(run.gate)}.`);
+    const actions = gitWriteActions(command);
+    const action = actions[0];
+    if (action) {
+      return guardDefaultBranch(pi, run, action, command, ctx.cwd).then((blocked) => {
+        if (blocked) return blocked;
+        if (actions.length > 1) return block("run commit and push as separate commands.");
+        if (action === "commit" && run.gate !== "commit") {
+          return block(`cannot commit before the final full suite; current gate is ${gateName(run.gate)}.`);
+        }
+        if (action === "push" && run.gate !== "push") {
+          return block(`cannot push before commit; current gate is ${gateName(run.gate)}.`);
+        }
+        const transition = commandForGate(run, command);
+        if (transition) run.transitions.set(event.toolCallId, transition);
+        return undefined;
+      });
     }
     if (/\bgh\s+pr\s+(create|edit|close|merge|ready-for-review)\b|\bgh\s+issue\s+close\b/.test(command)) {
       return block("PR action and Issue closure are performed by /build after push.");
