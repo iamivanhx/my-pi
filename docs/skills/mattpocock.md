@@ -5,7 +5,7 @@
 commit:
 
 ```text
-git:github.com/mattpocock/skills@2ab958093e83e0ec752e6c1c5932da465bf23e0c
+git:github.com/mattpocock/skills@2ffb184ffbb752faa664c0b204f3c9241b1428e9
 ```
 
 The selected paths live in [`.pi/settings.json`](../../.pi/settings.json).

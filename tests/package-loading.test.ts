@@ -113,7 +113,7 @@ test("documents immutable skill pins and their bump procedures", async () => {
 
   assert.match(agentInstructions, /docs\/skills\/mattpocock\.md/);
   assert.match(agentInstructions, /docs\/skills\/designer\.md/);
-  assert.match(mattPocockPin, /git:github\.com\/mattpocock\/skills@2ab958093e83e0ec752e6c1c5932da465bf23e0c/);
+  assert.match(mattPocockPin, /git:github\.com\/mattpocock\/skills@2ffb184ffbb752faa664c0b204f3c9241b1428e9/);
   assert.match(mattPocockPin, /pi install -l git:github\.com\/mattpocock\/skills@<new-commit>/);
   assert.match(designerPin, /b29e7cf65e5cb78a5ac33d582270551bc74a14eb/);
   assert.match(designerPin, /4e799d45c17aec1498c269287a83b9dba22b966b/);
