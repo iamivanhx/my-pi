@@ -55,14 +55,16 @@ function parseCommands(stdout: string) {
   return response?.data?.commands ?? [];
 }
 
-test("loads /learning from the project-local package path", async () => {
+test("loads /learning and /setup from the project-local package path", async () => {
   const configDirectory = await mkdtemp(resolve(tmpdir(), "my-pi-test-"));
 
   try {
     const result = getCommands(configDirectory, ["--no-skills"]);
 
     assert.equal(result.status, 0, result.stderr);
-    assert.ok(parseCommands(result.stdout).some((command) => command.name === "learning"));
+    const commandNames = parseCommands(result.stdout).map((command) => command.name);
+    assert.ok(commandNames.includes("learning"));
+    assert.ok(commandNames.includes("setup"));
   } finally {
     await rm(configDirectory, { recursive: true, force: true });
   }
