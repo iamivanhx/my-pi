@@ -20,6 +20,15 @@ const SUBAGENT_RESPONSE_EVENT = "prompt-template:subagent:response";
 
 type Gate = "clarify" | "red" | "green" | "review" | "full-suite" | "commit" | "push" | "pr" | "close" | "done";
 type Transition = "design" | "red" | "green" | "full-suite" | "commit" | "push";
+type Severity = "Critical" | "Major" | "Minor" | "Observation";
+type FindingSource = "code-review" | "issue-reviewer";
+
+type Finding = {
+  severity: Severity;
+  location: string;
+  detail: string;
+  source: FindingSource;
+};
 
 type Issue = {
   number: number;
@@ -36,6 +45,7 @@ type BuildRun = {
   transitions: Map<string, Transition>;
   announced: Set<Gate>;
   skills: Map<string, string>;
+  context: ExtensionContext;
   reviewRequestId?: string;
 };
 
@@ -94,6 +104,28 @@ function parseGroupIssues(issue: Issue): number[] {
   const group = issue.body.match(/^PR group:\s*(.+)$/im)?.[1];
   const numbers = group?.match(/\d+/g)?.map(Number) ?? [];
   return [...new Set([issue.number, ...numbers])].sort((left, right) => left - right);
+}
+
+function parseFindings(output: string, source: FindingSource): Finding[] {
+  const contract = /^\s*(?:[-*]\s+)?(Critical|Major|Minor|Observation)\s*—\s*([^—]+?)\s*—\s*(.+?)\s*$/gim;
+  return [...output.matchAll(contract)].map(([, severity, location, detail]) => ({
+    severity: `${severity[0].toUpperCase()}${severity.slice(1).toLowerCase()}` as Severity,
+    location: location.trim(),
+    detail: detail.trim(),
+    source,
+  }));
+}
+
+function formatFinding(finding: Finding): string {
+  return `${finding.severity} — ${finding.location} — ${finding.detail} (${finding.source})`;
+}
+
+function isBlockingFinding(finding: Finding): boolean {
+  return finding.severity === "Critical" || finding.severity === "Major";
+}
+
+function declaresNoFindings(output: string): boolean {
+  return /^no (?:actionable )?findings(?: qualify)?\.?$/i.test(output.trim());
 }
 
 function issueBranchName(issue: Issue): string {
@@ -176,6 +208,121 @@ function commandForGate(run: BuildRun, command: string): Transition | undefined 
   return undefined;
 }
 
+function collectCodeReviewFindings(run: BuildRun): Finding[] | Promise<Finding[]> {
+  const input = run.context.ui.input;
+  if (typeof input !== "function") return [];
+
+  const collect = (): Promise<Finding[]> => input.call(
+    run.context.ui,
+    "Code-review findings",
+    "Paste each finding as Severity — file:line — finding and impact; leave blank only when there are none",
+  ).then((output) => {
+    const trimmed = output?.trim() ?? "";
+    if (!trimmed || declaresNoFindings(trimmed)) return [];
+    const findings = parseFindings(trimmed, "code-review");
+    if (findings.length > 0) return findings;
+    run.context.ui.notify("Could not parse the code-review findings. Use one line per finding: Critical|Major|Minor|Observation — file:line — finding and impact.", "error");
+    return collect();
+  });
+  return collect();
+}
+
+async function createFollowUps(pi: ExtensionAPI, run: BuildRun, findings: Finding[]): Promise<string[] | undefined> {
+  const urls: string[] = [];
+  for (const finding of findings) {
+    const body = [
+      "## Deferred blocking review finding",
+      "",
+      formatFinding(finding),
+      "",
+      `Originating Issue: #${run.issue.number}`,
+      `Provenance: /build review gate; source: ${finding.source}.`,
+      "",
+      "This work was explicitly accepted for deferral by a human during /build.",
+    ].join("\n");
+    const created = await pi.exec("gh", [
+      "issue", "create",
+      "--title", `Follow up: ${finding.severity} review finding for #${run.issue.number} at ${finding.location}`,
+      "--label", "ready-for-agent",
+      "--body", body,
+    ], { cwd: run.context.cwd });
+    if (created.code !== 0) {
+      run.context.ui.notify(`Could not create a follow-up for ${formatFinding(finding)}: ${created.stderr.trim() || `exit code ${created.code}`}. Blocking findings remain undispositioned.`, "error");
+      return undefined;
+    }
+    urls.push(created.stdout.trim());
+  }
+  return urls;
+}
+
+async function processCompletedReview(pi: ExtensionAPI, run: BuildRun, response: DelegationResponse, codeReviewFindings: Finding[]): Promise<void> {
+  run.reviewRequestId = undefined;
+  const findings = [
+    ...codeReviewFindings,
+    ...parseFindings(response.output ?? "", "issue-reviewer"),
+  ];
+  const blocking = findings.filter(isBlockingFinding);
+  const nonBlocking = findings.filter((finding) => !isBlockingFinding(finding));
+
+  if (blocking.length > 0) {
+    pi.sendUserMessage([
+      "Blocking review findings must be resolved or explicitly accepted before the final suite:",
+      ...blocking.map((finding) => `- ${formatFinding(finding)}`),
+      nonBlocking.length > 0 ? "\nMinor and Observation findings are non-blocking and are surfaced for human disposition:" : "",
+      ...nonBlocking.map((finding) => `- ${formatFinding(finding)}`),
+    ].filter(Boolean).join("\n"), { deliverAs: "followUp" });
+
+    const select = run.context.ui.select;
+    const choice = typeof select === "function"
+      ? await select.call(run.context.ui, "Blocking review findings", [
+        "Remediate with a focused red/green cycle",
+        "Accept risk and create linked follow-up Issues",
+      ])
+      : undefined;
+    if (choice === "Remediate with a focused red/green cycle") {
+      run.gate = "red";
+      run.announced.delete("review");
+      run.announced.delete("red");
+      run.announced.delete("green");
+      pi.sendUserMessage("Remediate the blocking findings with a focused red/green cycle. Write a failing test for the fix, make it pass, then /build will re-run the review gate.", { deliverAs: "followUp" });
+      return;
+    }
+    if (choice !== "Accept risk and create linked follow-up Issues") {
+      pi.sendUserMessage("No explicit disposition was selected. Critical and Major findings remain blocking; final suite, commit, push, PR action, and Issue closure are unavailable.", { deliverAs: "followUp" });
+      return;
+    }
+
+    const confirm = run.context.ui.confirm;
+    const accepted = typeof confirm === "function" && await confirm.call(
+      run.context.ui,
+      "Accept blocking review findings?",
+      `Accept and defer ${blocking.length} Critical/Major finding(s)? A ready-for-agent linked follow-up Issue will be created for each one.`,
+    );
+    if (!accepted) {
+      pi.sendUserMessage("Human acceptance was not confirmed. Critical and Major findings remain blocking.", { deliverAs: "followUp" });
+      return;
+    }
+    const followUps = await createFollowUps(pi, run, blocking);
+    if (!followUps) return;
+
+    run.gate = "full-suite";
+    pi.sendUserMessage([
+      "The blocking findings were explicitly accepted and deferred to linked follow-up Issues:",
+      ...followUps.map((url) => `- ${url}`),
+      nonBlocking.length > 0 ? "\nMinor and Observation findings remain surfaced for human disposition." : "",
+      "\nEnter the final full-suite gate now. Run the project's complete test suite; no further implementation changes are allowed.",
+    ].filter(Boolean).join("\n"), { deliverAs: "followUp" });
+    return;
+  }
+
+  run.gate = "full-suite";
+  pi.sendUserMessage([
+    "The issue-reviewer completed its fresh-context defect hunt.",
+    findings.length > 0 ? `\nFindings for human disposition:\n${findings.map(formatFinding).join("\n")}` : "",
+    "\nMinor and Observation findings are non-blocking. Enter the final full-suite gate now; no further implementation changes are allowed.",
+  ].join("\n"), { deliverAs: "followUp" });
+}
+
 async function readSkill(run: BuildRun, name: string): Promise<{ path: string; content: string } | undefined> {
   const path = run.skills.get(name);
   if (!path) return undefined;
@@ -238,7 +385,7 @@ async function promptGate(pi: ExtensionAPI, run: BuildRun, ctx: ExtensionContext
       skill.content.trim(),
       "</skill>",
       "",
-      "An independent issue-reviewer is being dispatched in fresh context for the issue-scoped diff. Wait for its findings before the full suite.",
+      "Complete the injected code review, then translate every actionable finding into this exact contract for collection: <Critical|Major|Minor|Observation> — <file>:<line> — <finding and impact>. If there are no findings, say so. An independent issue-reviewer is being dispatched in fresh context for the issue-scoped diff. Wait for both review sources before the full suite.",
     ].join("\n"), { deliverAs: "followUp" });
     (pi.events as EventBus).emit(SUBAGENT_REQUEST_EVENT, {
       version: 1,
@@ -407,6 +554,7 @@ export default function buildExtension(pi: ExtensionAPI): void {
         transitions: new Map(),
         announced: new Set(),
         skills: new Map(skills),
+        context: ctx,
       };
       pi.sendUserMessage(startMessage(activeRun));
     },
@@ -499,11 +647,18 @@ export default function buildExtension(pi: ExtensionAPI): void {
       pi.sendUserMessage(`The issue-reviewer did not complete (${response.status ?? "unknown"}): ${response.error ?? "no details"}. Retry the review gate; do not run the final suite yet.`, { deliverAs: "followUp" });
       return;
     }
-    run.gate = "full-suite";
-    pi.sendUserMessage([
-      "The issue-reviewer completed its fresh-context defect hunt.",
-      response.output ? `\nFindings:\n${response.output}` : "",
-      "\nEnter the final full-suite gate now. Run the project's complete test suite; no further implementation changes are allowed.",
-    ].join("\n"), { deliverAs: "followUp" });
+    const reviewerOutput = response.output?.trim() ?? "";
+    if (reviewerOutput && !declaresNoFindings(reviewerOutput) && parseFindings(reviewerOutput, "issue-reviewer").length === 0) {
+      run.reviewRequestId = undefined;
+      run.announced.delete("review");
+      pi.sendUserMessage("The issue-reviewer returned non-empty findings that do not follow the required contract. Retry the review gate and do not run the final suite yet.", { deliverAs: "followUp" });
+      return;
+    }
+    const codeReviewFindings = collectCodeReviewFindings(run);
+    if (Array.isArray(codeReviewFindings)) {
+      void processCompletedReview(pi, run, response, codeReviewFindings);
+    } else {
+      void codeReviewFindings.then((findings) => processCompletedReview(pi, run, response, findings));
+    }
   });
 }
