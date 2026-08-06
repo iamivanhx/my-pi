@@ -591,3 +591,232 @@ test("does not mistake a feature branch ending in the default branch name for th
   assert.doesNotMatch(blocked?.reason ?? "", /default branch/i);
   assert.match(blocked?.reason ?? "", /before commit/i);
 });
+
+test("retries a malformed reviewer response, then blocks Critical findings, routes remediation through red/green, and re-runs review", async () => {
+  const skillDirectory = await mkdtemp(join(tmpdir(), "my-pi-build-test-"));
+  const tddPath = join(skillDirectory, "tdd.md");
+  const reviewPath = join(skillDirectory, "code-review.md");
+  await Promise.all([writeFile(tddPath, "# TDD\n"), writeFile(reviewPath, "# Code review\n")]);
+
+  try {
+    const { command, handlers, sentMessages, emitted, eventHandlers } = buildHarness(async (program, args) => {
+      if (program === "gh" && args[0] === "issue" && args[1] === "view") {
+        return { code: 0, stdout: JSON.stringify({ number: 45, title: "review gate", body: "Build it." }), stderr: "" };
+      }
+      if (args.join(" ") === "branch --show-current") return { code: 0, stdout: "build/45-review-gate\n", stderr: "" };
+      if (args.join(" ") === "symbolic-ref --short refs/remotes/origin/HEAD") return { code: 0, stdout: "origin/main\n", stderr: "" };
+      return { code: 0, stdout: "", stderr: "" };
+    });
+    const context = {
+      cwd: "/project", hasUI: true, isIdle: () => true, sessionManager: { getBranch: () => [] },
+      getSystemPromptOptions: () => ({ skills: [{ name: "tdd", filePath: tddPath }, { name: "code-review", filePath: reviewPath }] }),
+      ui: {
+        notify() {},
+        input: async () => "",
+        select: async () => "Remediate with a focused red/green cycle",
+      },
+    };
+    const toolCall = handlers.get("tool_call")!;
+    const toolResult = handlers.get("tool_result")!;
+    const agentEnd = handlers.get("agent_end")!;
+    const succeed = async (id: string, commandText: string, isError = false) => {
+      await toolCall({ toolName: "bash", toolCallId: id, input: { command: commandText } }, context);
+      toolResult({ toolName: "bash", toolCallId: id, isError }, context);
+      await agentEnd({}, context);
+    };
+
+    await command.handler("45", context);
+    await succeed("design", "gh issue comment 45 --body design");
+    await succeed("red", "pnpm test -- tests/build.test.ts", true);
+    await succeed("green", "pnpm test -- tests/build.test.ts");
+    await eventHandlers.get("prompt-template:subagent:response")?.({
+      requestId: (emitted[0].payload as { requestId: string }).requestId,
+      status: "completed",
+      output: "Critical: extensions/build.ts:1: closes an Issue before findings are dispositioned",
+    });
+    const malformedSuite = toolCall({ toolName: "bash", toolCallId: "malformed-suite", input: { command: "pnpm test" } }, context) as { block?: boolean };
+    assert.equal(malformedSuite?.block, true);
+    await agentEnd({}, context);
+    assert.equal(emitted.length, 2);
+
+    await eventHandlers.get("prompt-template:subagent:response")?.({
+      requestId: (emitted[1].payload as { requestId: string }).requestId,
+      status: "completed",
+      output: "Critical — extensions/build.ts:1 — closes an Issue before findings are dispositioned",
+    });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    assert.match(sentMessages.at(-2) ?? "", /Critical — extensions\/build\.ts:1/);
+    assert.match(sentMessages.at(-1) ?? "", /focused red\/green cycle/i);
+    assert.equal(emitted.length, 2);
+
+    await agentEnd({}, context);
+    assert.match(sentMessages.at(-1) ?? "", /focused failing test/i);
+
+    const fullSuite = toolCall({ toolName: "bash", toolCallId: "premature-suite", input: { command: "pnpm test" } }, context) as { block?: boolean; reason?: string };
+    assert.equal(fullSuite?.block, undefined);
+    toolResult({ toolName: "bash", toolCallId: "premature-suite", isError: true }, context);
+    await agentEnd({}, context);
+    assert.match(sentMessages.at(-1) ?? "", /Implement only enough production code/i);
+    await succeed("remediation-green", "pnpm test -- tests/build.test.ts");
+    assert.equal(emitted.length, 3);
+  } finally {
+    await rm(skillDirectory, { recursive: true, force: true });
+  }
+});
+
+test("requires explicit acceptance and creates linked ready-for-agent follow-ups for deferred blocking findings", async () => {
+  const skillDirectory = await mkdtemp(join(tmpdir(), "my-pi-build-test-"));
+  const tddPath = join(skillDirectory, "tdd.md");
+  const reviewPath = join(skillDirectory, "code-review.md");
+  await Promise.all([writeFile(tddPath, "# TDD\n"), writeFile(reviewPath, "# Code review\n")]);
+  const calls: Array<[string, string[]]> = [];
+  const notifications: Array<{ message: string; level: string }> = [];
+  const codeReviewReplies = ["## Standards\nMajor: missing severity contract", "Major — tests/build.test.ts:1 — an unprotected final gate remains"];
+
+  try {
+    const { command, handlers, emitted, eventHandlers } = buildHarness(async (program, args) => {
+      calls.push([program, args]);
+      if (program === "gh" && args[0] === "issue" && args[1] === "view") {
+        return { code: 0, stdout: JSON.stringify({ number: 45, title: "review gate", body: "Build it." }), stderr: "" };
+      }
+      if (program === "gh" && args.join(" ").startsWith("issue create")) return { code: 0, stdout: "https://github.com/iamivanhx/my-pi/issues/46\n", stderr: "" };
+      if (args.join(" ") === "branch --show-current") return { code: 0, stdout: "build/45-review-gate\n", stderr: "" };
+      if (args.join(" ") === "symbolic-ref --short refs/remotes/origin/HEAD") return { code: 0, stdout: "origin/main\n", stderr: "" };
+      return { code: 0, stdout: "", stderr: "" };
+    });
+    const context = {
+      cwd: "/project", hasUI: true, isIdle: () => true, sessionManager: { getBranch: () => [] },
+      getSystemPromptOptions: () => ({ skills: [{ name: "tdd", filePath: tddPath }, { name: "code-review", filePath: reviewPath }] }),
+      ui: {
+        notify: (message: string, level: string) => notifications.push({ message, level }),
+        input: async () => codeReviewReplies.shift()!,
+        select: async () => "Accept risk and create linked follow-up Issues",
+        confirm: async () => true,
+      },
+    };
+    const toolCall = handlers.get("tool_call")!;
+    const toolResult = handlers.get("tool_result")!;
+    const agentEnd = handlers.get("agent_end")!;
+    const succeed = async (id: string, commandText: string, isError = false) => {
+      await toolCall({ toolName: "bash", toolCallId: id, input: { command: commandText } }, context);
+      toolResult({ toolName: "bash", toolCallId: id, isError }, context);
+      await agentEnd({}, context);
+    };
+
+    await command.handler("45", context);
+    await succeed("design", "gh issue comment 45 --body design");
+    await succeed("red", "pnpm test -- tests/build.test.ts", true);
+    await succeed("green", "pnpm test -- tests/build.test.ts");
+    await eventHandlers.get("prompt-template:subagent:response")?.({
+      requestId: (emitted[0].payload as { requestId: string }).requestId,
+      status: "completed",
+      output: "Critical — extensions/build.ts:1 — closes an Issue before findings are dispositioned",
+    });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    const followUps = calls.filter(([program, args]) => program === "gh" && args[0] === "issue" && args[1] === "create");
+    assert.equal(followUps.length, 2);
+    assert.ok(notifications.some(({ message }) => /Could not parse the code-review findings/.test(message)));
+    assert.ok(followUps.every(([, args]) => args.includes("--label") && args.includes("ready-for-agent")));
+    assert.ok(followUps.every(([, args]) => args.at(-1)?.includes("Originating Issue: #45")));
+
+    const suite = toolCall({ toolName: "bash", toolCallId: "suite", input: { command: "pnpm test" } }, context) as { block?: boolean };
+    assert.equal(suite?.block, undefined);
+  } finally {
+    await rm(skillDirectory, { recursive: true, force: true });
+  }
+});
+
+test("keeps final suite, commit, push, PR action, and Issue closure unavailable when acceptance is not explicit", async () => {
+  const skillDirectory = await mkdtemp(join(tmpdir(), "my-pi-build-test-"));
+  const tddPath = join(skillDirectory, "tdd.md");
+  const reviewPath = join(skillDirectory, "code-review.md");
+  await Promise.all([writeFile(tddPath, "# TDD\n"), writeFile(reviewPath, "# Code review\n")]);
+
+  try {
+    const { command, handlers, emitted, eventHandlers } = buildHarness(async (program, args) => {
+      if (program === "gh" && args[0] === "issue" && args[1] === "view") return { code: 0, stdout: JSON.stringify({ number: 45, title: "review gate", body: "Build it." }), stderr: "" };
+      if (args.join(" ") === "branch --show-current") return { code: 0, stdout: "build/45-review-gate\n", stderr: "" };
+      if (args.join(" ") === "symbolic-ref --short refs/remotes/origin/HEAD") return { code: 0, stdout: "origin/main\n", stderr: "" };
+      return { code: 0, stdout: "", stderr: "" };
+    });
+    const context = {
+      cwd: "/project", hasUI: true, isIdle: () => true, sessionManager: { getBranch: () => [] },
+      getSystemPromptOptions: () => ({ skills: [{ name: "tdd", filePath: tddPath }, { name: "code-review", filePath: reviewPath }] }),
+      ui: { notify() {}, input: async () => "", select: async () => undefined },
+    };
+    const toolCall = handlers.get("tool_call")!;
+    const toolResult = handlers.get("tool_result")!;
+    const agentEnd = handlers.get("agent_end")!;
+    const succeed = async (id: string, commandText: string, isError = false) => {
+      await toolCall({ toolName: "bash", toolCallId: id, input: { command: commandText } }, context);
+      toolResult({ toolName: "bash", toolCallId: id, isError }, context);
+      await agentEnd({}, context);
+    };
+
+    await command.handler("45", context);
+    await succeed("design", "gh issue comment 45 --body design");
+    await succeed("red", "pnpm test -- tests/build.test.ts", true);
+    await succeed("green", "pnpm test -- tests/build.test.ts");
+    await eventHandlers.get("prompt-template:subagent:response")?.({
+      requestId: (emitted[0].payload as { requestId: string }).requestId,
+      status: "completed",
+      output: "Major — extensions/build.ts:1 — an undispositioned finding",
+    });
+
+    for (const commandText of ["pnpm test", "git commit -m premature", "git push", "gh pr create --draft", "gh issue close 45"]) {
+      const result = await toolCall({ toolName: "bash", toolCallId: commandText, input: { command: commandText } }, context) as { block?: boolean };
+      assert.equal(result?.block, true, commandText);
+    }
+  } finally {
+    await rm(skillDirectory, { recursive: true, force: true });
+  }
+});
+
+test("surfaces Minor and Observation findings without blocking the final suite", async () => {
+  const skillDirectory = await mkdtemp(join(tmpdir(), "my-pi-build-test-"));
+  const tddPath = join(skillDirectory, "tdd.md");
+  const reviewPath = join(skillDirectory, "code-review.md");
+  await Promise.all([writeFile(tddPath, "# TDD\n"), writeFile(reviewPath, "# Code review\n")]);
+
+  try {
+    const { command, handlers, sentMessages, emitted, eventHandlers } = buildHarness(async (program, args) => {
+      if (program === "gh" && args[0] === "issue" && args[1] === "view") return { code: 0, stdout: JSON.stringify({ number: 45, title: "review gate", body: "Build it." }), stderr: "" };
+      if (args.join(" ") === "branch --show-current") return { code: 0, stdout: "build/45-review-gate\n", stderr: "" };
+      if (args.join(" ") === "symbolic-ref --short refs/remotes/origin/HEAD") return { code: 0, stdout: "origin/main\n", stderr: "" };
+      return { code: 0, stdout: "", stderr: "" };
+    });
+    const context = {
+      cwd: "/project", hasUI: true, isIdle: () => true, sessionManager: { getBranch: () => [] },
+      getSystemPromptOptions: () => ({ skills: [{ name: "tdd", filePath: tddPath }, { name: "code-review", filePath: reviewPath }] }),
+      ui: { notify() {}, input: async () => "" },
+    };
+    const toolCall = handlers.get("tool_call")!;
+    const toolResult = handlers.get("tool_result")!;
+    const agentEnd = handlers.get("agent_end")!;
+    const succeed = async (id: string, commandText: string, isError = false) => {
+      await toolCall({ toolName: "bash", toolCallId: id, input: { command: commandText } }, context);
+      toolResult({ toolName: "bash", toolCallId: id, isError }, context);
+      await agentEnd({}, context);
+    };
+
+    await command.handler("45", context);
+    await succeed("design", "gh issue comment 45 --body design");
+    await succeed("red", "pnpm test -- tests/build.test.ts", true);
+    await succeed("green", "pnpm test -- tests/build.test.ts");
+    await eventHandlers.get("prompt-template:subagent:response")?.({
+      requestId: (emitted[0].payload as { requestId: string }).requestId,
+      status: "completed",
+      output: "Minor — extensions/build.ts:1 — message copy\nObservation — tests/build.test.ts:1 — cover another edge",
+    });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    assert.match(sentMessages.at(-1) ?? "", /Minor — extensions\/build\.ts:1/);
+    assert.match(sentMessages.at(-1) ?? "", /Observation — tests\/build\.test\.ts:1/);
+    const suite = toolCall({ toolName: "bash", toolCallId: "suite", input: { command: "pnpm test" } }, context) as { block?: boolean };
+    assert.equal(suite?.block, undefined);
+  } finally {
+    await rm(skillDirectory, { recursive: true, force: true });
+  }
+});
