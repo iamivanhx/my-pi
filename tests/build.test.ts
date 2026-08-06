@@ -306,6 +306,7 @@ test("creates a grouped draft PR and closes the Issue after push", async () => {
     eventHandlers.get("prompt-template:subagent:response")?.({
       requestId: (emitted[0].payload as { requestId: string }).requestId,
       status: "completed",
+      output: "No actionable findings.",
     });
     await succeed("suite", "pnpm test");
     await succeed("commit", "git commit -m 'feat: build gates'");
@@ -356,7 +357,7 @@ test("reuses a grouped draft PR whose closing references already contain the Iss
     await succeed("design", "gh issue comment 30 --body design");
     await succeed("red", "pnpm test -- tests/build.test.ts", true);
     await succeed("green", "pnpm test -- tests/build.test.ts");
-    eventHandlers.get("prompt-template:subagent:response")?.({ requestId: (emitted[0].payload as { requestId: string }).requestId, status: "completed" });
+    eventHandlers.get("prompt-template:subagent:response")?.({ requestId: (emitted[0].payload as { requestId: string }).requestId, status: "completed", output: "No actionable findings." });
     await succeed("suite", "pnpm test");
     await succeed("commit", "git commit -m second");
     await succeed("push", "git push");
@@ -467,7 +468,7 @@ test("refuses the PR action when the pushed branch becomes the default branch", 
     await succeed("design", "gh issue comment 42 --body design");
     await succeed("red", "pnpm test -- tests/build.test.ts", true);
     await succeed("green", "pnpm test -- tests/build.test.ts");
-    eventHandlers.get("prompt-template:subagent:response")?.({ requestId: (emitted[0].payload as { requestId: string }).requestId, status: "completed" });
+    eventHandlers.get("prompt-template:subagent:response")?.({ requestId: (emitted[0].payload as { requestId: string }).requestId, status: "completed", output: "No actionable findings." });
     await succeed("suite", "pnpm test");
     await succeed("commit", "git commit -m branch-safety");
     await toolCall({ toolName: "bash", toolCallId: "push", input: { command: "git push" } }, context);
@@ -665,7 +666,7 @@ test("retries a malformed reviewer response, then blocks Critical findings, rout
   }
 });
 
-test("requires explicit acceptance and creates linked ready-for-agent follow-ups for deferred blocking findings", async () => {
+test("queues accepted unsolved findings until PR action creates linked ready-for-agent follow-ups", async () => {
   const skillDirectory = await mkdtemp(join(tmpdir(), "my-pi-build-test-"));
   const tddPath = join(skillDirectory, "tdd.md");
   const reviewPath = join(skillDirectory, "code-review.md");
@@ -681,6 +682,8 @@ test("requires explicit acceptance and creates linked ready-for-agent follow-ups
         return { code: 0, stdout: JSON.stringify({ number: 45, title: "review gate", body: "Build it." }), stderr: "" };
       }
       if (program === "gh" && args.join(" ").startsWith("issue create")) return { code: 0, stdout: "https://github.com/iamivanhx/my-pi/issues/46\n", stderr: "" };
+      if (program === "gh" && args[0] === "pr" && args[1] === "list") return { code: 0, stdout: "[]", stderr: "" };
+      if (program === "gh" && args[0] === "pr" && args[1] === "create") return { code: 0, stdout: "https://github.com/iamivanhx/my-pi/pull/47\n", stderr: "" };
       if (args.join(" ") === "branch --show-current") return { code: 0, stdout: "build/45-review-gate\n", stderr: "" };
       if (args.join(" ") === "symbolic-ref --short refs/remotes/origin/HEAD") return { code: 0, stdout: "origin/main\n", stderr: "" };
       return { code: 0, stdout: "", stderr: "" };
@@ -691,7 +694,7 @@ test("requires explicit acceptance and creates linked ready-for-agent follow-ups
       ui: {
         notify: (message: string, level: string) => notifications.push({ message, level }),
         input: async () => codeReviewReplies.shift()!,
-        select: async () => "Accept risk and create linked follow-up Issues",
+        select: async () => "Cannot remediate inline; defer as linked follow-up Issues at completion",
         confirm: async () => true,
       },
     };
@@ -715,14 +718,17 @@ test("requires explicit acceptance and creates linked ready-for-agent follow-ups
     });
     await new Promise<void>((resolve) => setImmediate(resolve));
 
+    assert.equal(calls.filter(([program, args]) => program === "gh" && args[0] === "issue" && args[1] === "create").length, 0);
+    assert.ok(notifications.some(({ message }) => /Could not parse the code-review findings/.test(message)));
+
+    await succeed("suite", "pnpm test");
+    await succeed("commit", "git commit -m review-gate");
+    await succeed("push", "git push");
+
     const followUps = calls.filter(([program, args]) => program === "gh" && args[0] === "issue" && args[1] === "create");
     assert.equal(followUps.length, 2);
-    assert.ok(notifications.some(({ message }) => /Could not parse the code-review findings/.test(message)));
     assert.ok(followUps.every(([, args]) => args.includes("--label") && args.includes("ready-for-agent")));
     assert.ok(followUps.every(([, args]) => args.at(-1)?.includes("Originating Issue: #45")));
-
-    const suite = toolCall({ toolName: "bash", toolCallId: "suite", input: { command: "pnpm test" } }, context) as { block?: boolean };
-    assert.equal(suite?.block, undefined);
   } finally {
     await rm(skillDirectory, { recursive: true, force: true });
   }
@@ -816,6 +822,51 @@ test("surfaces Minor and Observation findings without blocking the final suite",
     assert.match(sentMessages.at(-1) ?? "", /Observation — tests\/build\.test\.ts:1/);
     const suite = toolCall({ toolName: "bash", toolCallId: "suite", input: { command: "pnpm test" } }, context) as { block?: boolean };
     assert.equal(suite?.block, undefined);
+  } finally {
+    await rm(skillDirectory, { recursive: true, force: true });
+  }
+});
+
+test("does not unlock the final suite when issue-reviewer returns no findings payload", async () => {
+  const skillDirectory = await mkdtemp(join(tmpdir(), "my-pi-build-test-"));
+  const tddPath = join(skillDirectory, "tdd.md");
+  const reviewPath = join(skillDirectory, "code-review.md");
+  await Promise.all([writeFile(tddPath, "# TDD\n"), writeFile(reviewPath, "# Code review\n")]);
+
+  try {
+    const { command, handlers, emitted, eventHandlers } = buildHarness(async (program, args) => {
+      if (program === "gh" && args[0] === "issue" && args[1] === "view") return { code: 0, stdout: JSON.stringify({ number: 45, title: "review gate", body: "Build it." }), stderr: "" };
+      if (args.join(" ") === "branch --show-current") return { code: 0, stdout: "build/45-review-gate\n", stderr: "" };
+      if (args.join(" ") === "symbolic-ref --short refs/remotes/origin/HEAD") return { code: 0, stdout: "origin/main\n", stderr: "" };
+      return { code: 0, stdout: "", stderr: "" };
+    });
+    const context = {
+      cwd: "/project", hasUI: true, isIdle: () => true, sessionManager: { getBranch: () => [] },
+      getSystemPromptOptions: () => ({ skills: [{ name: "tdd", filePath: tddPath }, { name: "code-review", filePath: reviewPath }] }),
+      ui: { notify() {}, input: async () => "" },
+    };
+    const toolCall = handlers.get("tool_call")!;
+    const toolResult = handlers.get("tool_result")!;
+    const agentEnd = handlers.get("agent_end")!;
+    const succeed = async (id: string, commandText: string, isError = false) => {
+      await toolCall({ toolName: "bash", toolCallId: id, input: { command: commandText } }, context);
+      toolResult({ toolName: "bash", toolCallId: id, isError }, context);
+      await agentEnd({}, context);
+    };
+
+    await command.handler("45", context);
+    await succeed("design", "gh issue comment 45 --body design");
+    await succeed("red", "pnpm test -- tests/build.test.ts", true);
+    await succeed("green", "pnpm test -- tests/build.test.ts");
+    await eventHandlers.get("prompt-template:subagent:response")?.({
+      requestId: (emitted[0].payload as { requestId: string }).requestId,
+      status: "completed",
+    });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    const suite = toolCall({ toolName: "bash", toolCallId: "suite", input: { command: "pnpm test" } }, context) as { block?: boolean; reason?: string };
+    assert.equal(suite?.block, true);
+    assert.match(suite?.reason ?? "", /issue-reviewer/i);
   } finally {
     await rm(skillDirectory, { recursive: true, force: true });
   }

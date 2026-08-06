@@ -46,6 +46,7 @@ type BuildRun = {
   announced: Set<Gate>;
   skills: Map<string, string>;
   context: ExtensionContext;
+  deferredFindings: Finding[];
   reviewRequestId?: string;
 };
 
@@ -276,7 +277,7 @@ async function processCompletedReview(pi: ExtensionAPI, run: BuildRun, response:
     const choice = typeof select === "function"
       ? await select.call(run.context.ui, "Blocking review findings", [
         "Remediate with a focused red/green cycle",
-        "Accept risk and create linked follow-up Issues",
+        "Cannot remediate inline; defer as linked follow-up Issues at completion",
       ])
       : undefined;
     if (choice === "Remediate with a focused red/green cycle") {
@@ -287,7 +288,7 @@ async function processCompletedReview(pi: ExtensionAPI, run: BuildRun, response:
       pi.sendUserMessage("Remediate the blocking findings with a focused red/green cycle. Write a failing test for the fix, make it pass, then /build will re-run the review gate.", { deliverAs: "followUp" });
       return;
     }
-    if (choice !== "Accept risk and create linked follow-up Issues") {
+    if (choice !== "Cannot remediate inline; defer as linked follow-up Issues at completion") {
       pi.sendUserMessage("No explicit disposition was selected. Critical and Major findings remain blocking; final suite, commit, push, PR action, and Issue closure are unavailable.", { deliverAs: "followUp" });
       return;
     }
@@ -295,20 +296,18 @@ async function processCompletedReview(pi: ExtensionAPI, run: BuildRun, response:
     const confirm = run.context.ui.confirm;
     const accepted = typeof confirm === "function" && await confirm.call(
       run.context.ui,
-      "Accept blocking review findings?",
-      `Accept and defer ${blocking.length} Critical/Major finding(s)? A ready-for-agent linked follow-up Issue will be created for each one.`,
+      "Defer unsolved review findings?",
+      `Confirm that ${blocking.length} Critical/Major finding(s) cannot be remediated inline. Ready-for-agent linked follow-up Issues will be created after push, before this Issue is closed.`,
     );
     if (!accepted) {
-      pi.sendUserMessage("Human acceptance was not confirmed. Critical and Major findings remain blocking.", { deliverAs: "followUp" });
+      pi.sendUserMessage("Human deferral was not confirmed. Critical and Major findings remain blocking.", { deliverAs: "followUp" });
       return;
     }
-    const followUps = await createFollowUps(pi, run, blocking);
-    if (!followUps) return;
+    run.deferredFindings.push(...blocking);
 
     run.gate = "full-suite";
     pi.sendUserMessage([
-      "The blocking findings were explicitly accepted and deferred to linked follow-up Issues:",
-      ...followUps.map((url) => `- ${url}`),
+      "The unsolved blocking findings were explicitly accepted for deferred follow-up at completion.",
       nonBlocking.length > 0 ? "\nMinor and Observation findings remain surfaced for human disposition." : "",
       "\nEnter the final full-suite gate now. Run the project's complete test suite; no further implementation changes are allowed.",
     ].filter(Boolean).join("\n"), { deliverAs: "followUp" });
@@ -466,6 +465,13 @@ async function performPrAction(pi: ExtensionAPI, run: BuildRun, ctx: ExtensionCo
     ctx.ui.notify(`Opened draft PR: ${created.stdout.trim()}`, "info");
   }
 
+  if (run.deferredFindings.length > 0) {
+    const followUps = await createFollowUps(pi, run, run.deferredFindings);
+    if (!followUps) return;
+    run.deferredFindings = [];
+    ctx.ui.notify(`Created ${followUps.length} linked follow-up Issue(s) for explicitly deferred blocking findings.`, "info");
+  }
+
   run.gate = "close";
   const closed = await pi.exec("gh", ["issue", "close", String(run.issue.number)], { cwd: ctx.cwd });
   if (closed.code !== 0) {
@@ -555,6 +561,7 @@ export default function buildExtension(pi: ExtensionAPI): void {
         announced: new Set(),
         skills: new Map(skills),
         context: ctx,
+        deferredFindings: [],
       };
       pi.sendUserMessage(startMessage(activeRun));
     },
@@ -648,10 +655,10 @@ export default function buildExtension(pi: ExtensionAPI): void {
       return;
     }
     const reviewerOutput = response.output?.trim() ?? "";
-    if (reviewerOutput && !declaresNoFindings(reviewerOutput) && parseFindings(reviewerOutput, "issue-reviewer").length === 0) {
+    if (!reviewerOutput || (!declaresNoFindings(reviewerOutput) && parseFindings(reviewerOutput, "issue-reviewer").length === 0)) {
       run.reviewRequestId = undefined;
       run.announced.delete("review");
-      pi.sendUserMessage("The issue-reviewer returned non-empty findings that do not follow the required contract. Retry the review gate and do not run the final suite yet.", { deliverAs: "followUp" });
+      pi.sendUserMessage("The issue-reviewer returned no usable findings. Retry the review gate and do not run the final suite yet.", { deliverAs: "followUp" });
       return;
     }
     const codeReviewFindings = collectCodeReviewFindings(run);
